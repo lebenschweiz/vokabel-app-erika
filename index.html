@@ -128,6 +128,10 @@ input.auto, select.auto { border-color: var(--accent); box-shadow: inset 3px 0 0
 
 /* Lists */
 .search { display: flex; gap: 8px; }
+.search { flex-wrap: wrap; }
+.search input { flex: 1 1 200px; }
+.search select { flex: 1 1 160px; width: auto; }
+.score { font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 ul.words { list-style: none; margin: 0; padding: 0; display: grid; }
 ul.words li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
 ul.words li:last-child { border-bottom: 0; }
@@ -243,6 +247,13 @@ ul.words li:last-child { border-bottom: 0; }
     <div class="card">
       <div class="search">
         <input type="text" id="q" placeholder="Поиск по-немецки или по-русски" aria-label="Поиск">
+        <select id="sort" aria-label="Сортировка">
+          <option value="new">Новые сначала</option>
+          <option value="known">Лучше всего знаю</option>
+          <option value="often">Чаще всего учил(а)</option>
+          <option value="hard">Труднее всего</option>
+          <option value="abc">По алфавиту</option>
+        </select>
       </div>
       <div id="sample-bar"></div>
       <ul class="words" id="all-list"></ul>
@@ -288,11 +299,11 @@ ul.words li:last-child { border-bottom: 0; }
   let words = [];
   let ready = false;
   let backend = null; // {add, update, remove}
-  const ui = { tab: "learn", dir: "de-ru", mode: "card", q: "", confirmId: null, confirmSamples: false };
+  const ui = { tab: "learn", dir: "de-ru", mode: "card", q: "", confirmId: null, confirmSamples: false, sort: "new" };
   let session = null;
 
-  try { const s = JSON.parse(localStorage.getItem("wz-ui") || "{}"); if (s.dir) ui.dir = s.dir; if (s.mode) ui.mode = s.mode; if (s.tab) ui.tab = s.tab; } catch (e) {}
-  const saveUi = () => { try { localStorage.setItem("wz-ui", JSON.stringify({ dir: ui.dir, mode: ui.mode, tab: ui.tab })); } catch (e) {} };
+  try { const s = JSON.parse(localStorage.getItem("wz-ui") || "{}"); if (s.dir) ui.dir = s.dir; if (s.mode) ui.mode = s.mode; if (s.tab) ui.tab = s.tab; if (s.sort) ui.sort = s.sort; } catch (e) {}
+  const saveUi = () => { try { localStorage.setItem("wz-ui", JSON.stringify({ dir: ui.dir, mode: ui.mode, tab: ui.tab, sort: ui.sort })); } catch (e) {} };
 
   // ---------- storage ----------
   // Без входа: localStorage. После входа через Google: Firestore (users/{uid}/words), одинаково во всех браузерах.
@@ -563,7 +574,7 @@ ul.words li:last-child { border-bottom: 0; }
   function wordRow(w, opts = {}) {
     const confirming = ui.confirmId === w.id;
     return `<li>
-      <div class="w-de" lang="de">${deHtml(w)}${w.plural ? ` <span class="pl">· ${esc(w.plural)}</span>` : ""}</div>
+      <div class="w-de" lang="de">${deHtml(w)}${w.plural ? ` <span class="pl">· ${esc(w.plural)}</span>` : ""}${(w.right || w.wrong) ? ` <span class="score" title="Верно / неверно">✓${w.right || 0} ✗${w.wrong || 0}</span>` : ""}</div>
       <div class="w-side">
         <div class="row">${w.sample ? `<span class="chip sample">пример</span>` : ""}${isLearned(w) ? `<span class="chip learned">выучено</span>` : boxesHtml(w.box || 0)}</div>
         ${confirming
@@ -575,12 +586,23 @@ ul.words li:last-child { border-bottom: 0; }
       <div class="w-ru" lang="ru">${esc(w.ru)}${w.example ? ` · <i lang="de">${esc(w.example)}</i>` : ""}</div>
     </li>`;
   }
+  // Сортировка списка «Все слова»
+  const level = (w) => isLearned(w) ? BOX_MAX + 1 : (w.box || 0);
+  const seen = (w) => (w.right || 0) + (w.wrong || 0);
+  const newest = (a, b) => (b.createdAt || 0) - (a.createdAt || 0);
+  const SORTS = {
+    new: newest,
+    known: (a, b) => level(b) - level(a) || (b.right || 0) - (a.right || 0) || (a.wrong || 0) - (b.wrong || 0) || newest(a, b),
+    often: (a, b) => seen(b) - seen(a) || (b.right || 0) - (a.right || 0) || newest(a, b),
+    hard: (a, b) => (b.wrong || 0) - (a.wrong || 0) || level(a) - level(b) || seen(b) - seen(a) || newest(a, b),
+    abc: (a, b) => a.de.localeCompare(b.de, "de", { sensitivity: "base" }),
+  };
   function renderAll() {
     const list = $("#all-list");
     if (!ready) { list.innerHTML = `<li class="empty">Загружаю…</li>`; return; }
     const q = norm(ui.q);
     const items = words.filter(w => !q || norm(deFull(w)).includes(q) || norm(w.ru).includes(q))
-      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      .sort(SORTS[ui.sort] || SORTS.new);
     list.innerHTML = items.length ? items.map(w => wordRow(w)).join("") :
       `<li class="empty">${words.length ? "Ничего не найдено." : "Пока нет слов. Добавь первое во вкладке «Добавить»."}</li>`;
     const samples = words.filter(w => w.sample);
@@ -639,6 +661,8 @@ ul.words li:last-child { border-bottom: 0; }
   });
 
   $("#q").addEventListener("input", (e) => { ui.q = e.target.value; renderAll(); });
+  $("#sort").value = SORTS[ui.sort] ? ui.sort : "new";
+  $("#sort").addEventListener("change", (e) => { ui.sort = e.target.value; saveUi(); renderAll(); });
 
   $("#add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
