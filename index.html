@@ -141,6 +141,8 @@ ul.words li:last-child { border-bottom: 0; }
 .actions { display: flex; gap: 2px; }
 .empty { text-align: center; color: var(--muted); padding: 24px 8px; }
 .day { font-size: .8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding-top: 12px; }
+.account { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .88rem; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 8px 8px 8px 14px; }
+.account b { color: var(--ink); font-weight: 600; overflow-wrap: anywhere; }
 .notice { font-size: .85rem; color: var(--muted); background: var(--soft); border-radius: 10px; padding: 8px 12px; }
 .confirm { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: .85rem; }
 @media (prefers-reduced-motion: no-preference) {
@@ -160,6 +162,11 @@ ul.words li:last-child { border-bottom: 0; }
       <div class="stat"><b id="st-total">–</b><span>слов</span></div>
       <div class="stat"><b id="st-due">–</b><span>на сегодня</span></div>
       <div class="stat"><b id="st-learned">–</b><span>выучено</span></div>
+    </div>
+    <div class="account" id="account" hidden>
+      <span class="grow" id="acc-text"></span>
+      <button class="btn small primary" id="login" hidden>Войти через Google</button>
+      <button class="btn small ghost" id="logout" hidden>Выйти</button>
     </div>
   </header>
 
@@ -242,7 +249,7 @@ ul.words li:last-child { border-bottom: 0; }
     </div>
     <div class="card">
       <div class="label">Резервная копия</div>
-      <p class="hint">Слова и прогресс хранятся только в этом браузере. Сохрани копию, чтобы перенести словарь на другое устройство или не потерять его.</p>
+      <p class="hint" id="backup-hint">Слова и прогресс хранятся только в этом браузере. Сохрани копию, чтобы перенести словарь на другое устройство или не потерять его.</p>
       <div class="row">
         <button class="btn small" id="export">Сохранить копию</button>
         <button class="btn small" id="import-btn">Загрузить копию</button>
@@ -269,6 +276,7 @@ ul.words li:last-child { border-bottom: 0; }
   </section>
 </div>
 
+<script src="firebase-config.js"></script>
 <script>
 (() => {
   const BOX_MAX = 5;
@@ -287,31 +295,112 @@ ul.words li:last-child { border-bottom: 0; }
   const saveUi = () => { try { localStorage.setItem("wz-ui", JSON.stringify({ dir: ui.dir, mode: ui.mode, tab: ui.tab })); } catch (e) {} };
 
   // ---------- storage ----------
+  // Без входа: localStorage. После входа через Google: Firestore (users/{uid}/words), одинаково во всех браузерах.
+  const LOCAL_KEY = "wz-words";
+  const readLocal = () => { try { const s = localStorage.getItem(LOCAL_KEY); return s ? JSON.parse(s) : null; } catch (e) { return null; } };
+  const newId = () => "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   function localBackend() {
-    const KEY = "wz-words";
-    const save = () => { try { localStorage.setItem(KEY, JSON.stringify(words)); } catch (e) { showNote("Браузер не даёт сохранить слова. Сделай резервную копию во вкладке «Все слова»."); } };
+    const save = () => { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(words)); } catch (e) { showNote("Браузер не даёт сохранить слова. Сделай резервную копию во вкладке «Все слова»."); } };
     return {
-      save,
-      async add(w) { words.push({ id: "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ...w }); save(); render(); },
+      cloud: false,
+      async add(w) { words.push({ id: newId(), ...w }); save(); render(); },
       async update(id, patch) { const w = words.find(x => x.id === id); if (w) Object.assign(w, patch); save(); render(); },
       async remove(id) { words = words.filter(x => x.id !== id); save(); render(); },
+      async replaceAll(list) { words = list; save(); render(); },
     };
+  }
+  async function seedWords() {
+    try { const r = await fetch("words.json", { cache: "no-cache" }); return r.ok ? await r.json() : []; } catch (e) { return []; }
+  }
+
+  let fb = null, unsub = null;
+  async function loadFirebase() {
+    const cfg = window.FIREBASE_CONFIG;
+    if (!cfg || !cfg.apiKey) return null;
+    const V = "10.14.1", base = "https://www.gstatic.com/firebasejs/" + V + "/";
+    const [app, auth, fs] = await Promise.all([import(base + "firebase-app.js"), import(base + "firebase-auth.js"), import(base + "firebase-firestore.js")]);
+    const a = app.initializeApp(cfg);
+    let db;
+    try { db = fs.initializeFirestore(a, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) }); }
+    catch (e) { db = fs.getFirestore(a); }
+    return { auth, fs, db, au: auth.getAuth(a) };
+  }
+  function cloudBackend(uid) {
+    const { fs, db } = fb;
+    const col = fs.collection(db, "users", uid, "words");
+    const strip = ({ id, ...rest }) => rest;
+    const bg = (p) => { p.catch(e => showNote("Изменение не сохранилось (" + (e?.code || e?.message || "ошибка") + ").")); return Promise.resolve(); };
+    async function writeAll(list, del = []) {
+      const ops = [...del.map(id => ["d", id]), ...list.map(w => ["s", w])];
+      for (let i = 0; i < ops.length; i += 400) {
+        const batch = fs.writeBatch(db);
+        for (const [op, x] of ops.slice(i, i + 400)) op === "d" ? batch.delete(fs.doc(col, x)) : batch.set(fs.doc(col, x.id || newId()), strip(x));
+        await batch.commit();
+      }
+    }
+    return {
+      cloud: true, col, writeAll,
+      // Не ждём подтверждения сервера: Firestore сразу показывает изменение и досылает его, когда есть интернет.
+      add: (w) => bg(fs.setDoc(fs.doc(col, newId()), w)),
+      update: (id, patch) => bg(fs.updateDoc(fs.doc(col, id), patch)),
+      remove: (id) => bg(fs.deleteDoc(fs.doc(col, id))),
+      replaceAll: (list) => writeAll(list, words.map(w => w.id).filter(id => !list.some(x => x.id === id))),
+    };
+  }
+  async function useCloud(user) {
+    unsub?.(); unsub = null;
+    backend = cloudBackend(user.uid);
+    ready = false; session = null; render();
+    try {
+      const snap = await fb.fs.getDocs(backend.col);
+      if (snap.empty) {
+        // Первый вход: переносим словарь из этого браузера (или стартовый словарь) в облако
+        const start = readLocal() || await seedWords();
+        await backend.writeAll(start);
+      }
+    } catch (e) { showNote("Не удалось открыть облачный словарь (" + (e?.code || e?.message || "ошибка") + ")."); }
+    unsub = fb.fs.onSnapshot(backend.col, (s) => {
+      words = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready = true; render();
+    }, (err) => showNote("Не удалось загрузить словарь: " + (err?.code || err?.message || "ошибка")));
+  }
+  async function useLocal() {
+    unsub?.(); unsub = null;
+    backend = localBackend();
+    words = readLocal();
+    if (!words) { words = await seedWords(); try { localStorage.setItem(LOCAL_KEY, JSON.stringify(words)); } catch (e) {} }
+    ready = true; render();
+  }
+  function showAccount(user) {
+    const acc = $("#account");
+    acc.hidden = false;
+    $("#login").hidden = !!user;
+    $("#logout").hidden = !user;
+    $("#acc-text").innerHTML = user
+      ? `Синхронизация включена: <b>${esc(user.email || user.displayName || "аккаунт")}</b>`
+      : "Слова сохраняются только в этом браузере. Войди, чтобы они были на всех устройствах.";
+    $("#backup-hint").textContent = user
+      ? "Словарь хранится в облаке и одинаков на всех устройствах, где ты вошёл(-ла). Копия пригодится на всякий случай."
+      : "Слова и прогресс хранятся только в этом браузере. Сохрани копию, чтобы перенести словарь на другое устройство или не потерять его.";
   }
 
   async function init() {
     render();
-    backend = localBackend();
-    let stored = null;
-    try { stored = localStorage.getItem("wz-words"); } catch (e) {}
-    if (stored) {
-      try { words = JSON.parse(stored); } catch (e) { words = []; }
-    } else {
-      // Первый запуск: загружаем стартовый словарь
-      try { const r = await fetch("words.json", { cache: "no-cache" }); words = r.ok ? await r.json() : []; } catch (e) { words = []; }
-      backend.save();
-    }
-    ready = true;
-    render();
+    try { fb = await loadFirebase(); } catch (e) { fb = null; showNote("Синхронизация сейчас недоступна, слова сохраняются в этом браузере."); }
+    if (!fb) { await useLocal(); return; }
+    $("#login").addEventListener("click", async () => {
+      const provider = new fb.auth.GoogleAuthProvider();
+      try { await fb.auth.signInWithPopup(fb.au, provider); }
+      catch (e) {
+        if (e?.code === "auth/popup-blocked" || e?.code === "auth/operation-not-supported-in-this-environment") fb.auth.signInWithRedirect(fb.au, provider);
+        else if (e?.code !== "auth/popup-closed-by-user" && e?.code !== "auth/cancelled-popup-request") showNote("Вход не удался (" + (e?.code || "ошибка") + ").");
+      }
+    });
+    $("#logout").addEventListener("click", () => fb.auth.signOut(fb.au));
+    fb.auth.onAuthStateChanged(fb.au, async (user) => {
+      showAccount(user);
+      if (user) await useCloud(user); else await useLocal();
+    });
   }
   function showNote(t) { const n = $("#mode-note"); n.textContent = t; n.hidden = false; }
   async function safe(p, failMsg) { try { await p; return true; } catch (e) { showNote(failMsg + " (" + (e?.code || e?.message || "ошибка") + ")"); return false; } }
@@ -709,8 +798,8 @@ ul.words li:last-child { border-bottom: 0; }
     try {
       const data = JSON.parse(await f.text());
       if (!Array.isArray(data) || !data.every(w => w && typeof w.de === "string" && typeof w.ru === "string")) throw new Error("format");
-      words = data.map(w => ({ ...w, id: w.id || "l" + Math.random().toString(36).slice(2, 10) }));
-      backend.save(); session = null; render();
+      session = null;
+      await backend.replaceAll(data.map(w => ({ ...w, id: w.id || newId() })));
       t.style.color = ""; t.textContent = `Загружено: ${words.length} ${plural(words.length, "слово", "слова", "слов")}`;
     } catch (err) { t.style.color = "var(--bad)"; t.textContent = "Это не файл резервной копии словаря."; }
   });
