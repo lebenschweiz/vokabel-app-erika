@@ -255,6 +255,14 @@ ul.words li:last-child { border-bottom: 0; }
           <option value="abc">По алфавиту</option>
         </select>
       </div>
+      <div class="row">
+        <div class="seg" role="group" aria-label="Период">
+          <button data-period="all" aria-pressed="true">Все</button>
+          <button data-period="today" aria-pressed="false">Сегодня</button>
+          <button data-period="week" aria-pressed="false">Эта неделя</button>
+        </div>
+        <span class="hint" id="period-info"></span>
+      </div>
       <div id="sample-bar"></div>
       <ul class="words" id="all-list"></ul>
     </div>
@@ -299,11 +307,11 @@ ul.words li:last-child { border-bottom: 0; }
   let words = [];
   let ready = false;
   let backend = null; // {add, update, remove}
-  const ui = { tab: "learn", dir: "de-ru", mode: "card", q: "", confirmId: null, confirmSamples: false, sort: "new" };
+  const ui = { tab: "learn", dir: "de-ru", mode: "card", q: "", confirmId: null, confirmSamples: false, sort: "new", period: "all" };
   let session = null;
 
-  try { const s = JSON.parse(localStorage.getItem("wz-ui") || "{}"); if (s.dir) ui.dir = s.dir; if (s.mode) ui.mode = s.mode; if (s.tab) ui.tab = s.tab; if (s.sort) ui.sort = s.sort; } catch (e) {}
-  const saveUi = () => { try { localStorage.setItem("wz-ui", JSON.stringify({ dir: ui.dir, mode: ui.mode, tab: ui.tab, sort: ui.sort })); } catch (e) {} };
+  try { const s = JSON.parse(localStorage.getItem("wz-ui") || "{}"); if (s.dir) ui.dir = s.dir; if (s.mode) ui.mode = s.mode; if (s.tab) ui.tab = s.tab; if (s.sort) ui.sort = s.sort; if (s.period) ui.period = s.period; } catch (e) {}
+  const saveUi = () => { try { localStorage.setItem("wz-ui", JSON.stringify({ dir: ui.dir, mode: ui.mode, tab: ui.tab, sort: ui.sort, period: ui.period })); } catch (e) {} };
 
   // ---------- storage ----------
   // Без входа: localStorage. После входа через Google: Firestore (users/{uid}/words), одинаково во всех браузерах.
@@ -611,14 +619,28 @@ ul.words li:last-child { border-bottom: 0; }
     hard: (a, b) => (b.wrong || 0) - (a.wrong || 0) || level(a) - level(b) || seen(b) - seen(a) || newest(a, b),
     abc: (a, b) => a.de.localeCompare(b.de, "de", { sensitivity: "base" }),
   };
+  // Начало периода: сегодня с 00:00 или неделя с понедельника 00:00 (по местному времени)
+  function periodStart(p) {
+    if (p !== "today" && p !== "week") return 0;
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    if (p === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d.getTime();
+  }
   function renderAll() {
     const list = $("#all-list");
     if (!ready) { list.innerHTML = `<li class="empty">Загружаю…</li>`; return; }
     const q = norm(ui.q);
-    const items = words.filter(w => !q || norm(deFull(w)).includes(q) || norm(w.ru).includes(q))
+    document.querySelectorAll("[data-period]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.period === ui.period)));
+    const from = periodStart(ui.period);
+    const inPeriod = words.filter(w => !from || Math.max(w.lastSeen || 0, w.learnedAt || 0) >= from);
+    const items = inPeriod.filter(w => !q || norm(deFull(w)).includes(q) || norm(w.ru).includes(q))
       .sort(SORTS[ui.sort] || SORTS.new);
+    const nLearned = inPeriod.filter(w => w.learnedAt && w.learnedAt >= from).length;
+    $("#period-info").textContent = from
+      ? `${inPeriod.length} ${plural(inPeriod.length, "слово", "слова", "слов")}${nLearned ? `, выучено: ${nLearned}` : ""}`
+      : "";
     list.innerHTML = items.length ? items.map(w => wordRow(w)).join("") :
-      `<li class="empty">${words.length ? "Ничего не найдено." : "Пока нет слов. Добавь первое во вкладке «Добавить»."}</li>`;
+      `<li class="empty">${!words.length ? "Пока нет слов. Добавь первое во вкладке «Добавить»." : from && !inPeriod.length ? (ui.period === "today" ? "Сегодня ты ещё не учил(а) слова." : "На этой неделе ты ещё не учил(а) слова.") : "Ничего не найдено."}</li>`;
     const samples = words.filter(w => w.sample);
     $("#sample-bar").innerHTML = samples.length ? `<div class="notice row"><span class="grow">Слова с пометкой «пример» добавлены для демонстрации.</span>${ui.confirmSamples
       ? `<span class="confirm">Удалить ${samples.length}? <button class="btn small bad" id="del-samples-yes">Да</button><button class="btn small ghost" id="del-samples-no">Нет</button></span>`
@@ -677,6 +699,7 @@ ul.words li:last-child { border-bottom: 0; }
   $("#q").addEventListener("input", (e) => { ui.q = e.target.value; renderAll(); });
   $("#sort").value = SORTS[ui.sort] ? ui.sort : "new";
   $("#sort").addEventListener("change", (e) => { ui.sort = e.target.value; saveUi(); renderAll(); });
+  document.querySelectorAll("[data-period]").forEach(b => b.addEventListener("click", () => { ui.period = b.dataset.period; saveUi(); renderAll(); }));
 
   $("#add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
