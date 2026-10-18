@@ -334,7 +334,11 @@ ul.words li:last-child { border-bottom: 0; }
     let db;
     try { db = fs.initializeFirestore(a, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) }); }
     catch (e) { db = fs.getFirestore(a); }
-    return { auth, fs, db, au: auth.getAuth(a) };
+    // Вход хранится постоянно (IndexedDB, запасной вариант localStorage), пока человек сам не нажмёт «Выйти».
+    let au;
+    try { au = auth.initializeAuth(a, { persistence: [auth.indexedDBLocalPersistence, auth.browserLocalPersistence], popupRedirectResolver: auth.browserPopupRedirectResolver }); }
+    catch (e) { au = auth.getAuth(a); }
+    return { auth, fs, db, au };
   }
   function cloudBackend(uid) {
     const { fs, db } = fb;
@@ -395,8 +399,14 @@ ul.words li:last-child { border-bottom: 0; }
       : "Слова и прогресс хранятся только в этом браузере. Сохрани копию, чтобы перенести словарь на другое устройство или не потерять его.";
   }
 
+  const SIGNED_KEY = "wz-signed-in";
+  const getSigned = () => { try { return localStorage.getItem(SIGNED_KEY) || ""; } catch (e) { return ""; } };
+  const setSigned = (v) => { try { v ? localStorage.setItem(SIGNED_KEY, v) : localStorage.removeItem(SIGNED_KEY); } catch (e) {} };
+
   async function init() {
     render();
+    const was = getSigned();
+    if (was) { $("#account").hidden = false; $("#login").hidden = true; $("#logout").hidden = true; $("#acc-text").innerHTML = `Вхожу как <b>${esc(was)}</b>…`; }
     try { fb = await loadFirebase(); } catch (e) { fb = null; showNote("Синхронизация сейчас недоступна, слова сохраняются в этом браузере."); }
     if (!fb) { await useLocal(); return; }
     $("#login").addEventListener("click", async () => {
@@ -407,9 +417,13 @@ ul.words li:last-child { border-bottom: 0; }
         else if (e?.code !== "auth/popup-closed-by-user" && e?.code !== "auth/cancelled-popup-request") showNote("Вход не удался (" + (e?.code || "ошибка") + ").");
       }
     });
-    $("#logout").addEventListener("click", () => fb.auth.signOut(fb.au));
+    $("#logout").addEventListener("click", () => { setSigned(""); fb.auth.signOut(fb.au); });
+    fb.auth.getRedirectResult(fb.au).catch(() => {});
     fb.auth.onAuthStateChanged(fb.au, async (user) => {
+      const lost = !user && getSigned();
+      if (user) setSigned(user.email || user.uid);
       showAccount(user);
+      if (lost) { setSigned(""); showNote("Браузер забыл вход (например, приватный режим или очищены данные сайта). Нажми «Войти через Google» ещё раз."); }
       if (user) await useCloud(user); else await useLocal();
     });
   }
